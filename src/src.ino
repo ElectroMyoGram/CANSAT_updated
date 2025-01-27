@@ -40,5 +40,5 @@ Serial.println(accelZ);
   // Serial.println(temp);
 
   t += 0.1;  // Increment time (simulate ~10Hz data rate)
-  delay(100);  // 100ms delay
+  delay(101);  // 101ms delay
 }
