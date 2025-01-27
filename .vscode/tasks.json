@@ -1,0 +1,37 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Arduino Compile & Upload",
+      "command": "arduino-cli",
+      "type": "shell",
+      "args": [
+        "compile",
+        "--upload",
+        "--fqbn",
+        "arduino:esp32:nano_nora",
+        "-p",
+        "COM7",
+        "src/src.ino"
+      ],
+      "problemMatcher": [
+        // "$tsc"
+      ],
+      "presentation": {
+        "reveal": "always"
+      },
+      "group": "build"
+    },
+    {
+      "label": "Arduino Compile Only",
+      "command": "arduino-cli",
+      "args": [
+        "compile",
+        "--fqbn",
+        "arduino:esp32:nano_nora",
+        "src/src.ino"
+      ],
+      "problemMatcher": []
+    }
+  ]
+}
