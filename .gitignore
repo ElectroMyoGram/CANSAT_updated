@@ -1,0 +1,45 @@
+# Ignore Python virtual environment
+.venv/
+
+# Byte-compiled / cached files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE/editor-specific files
+.vscode/
+.idea/
+*.sublime-workspace
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+
+# Python virtual environments (alternative names)
+venv/
+env/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Coverage reports
+.coverage
+htmlcov/
+
+# MyPy type checking reports
+.mypy_cache/
+
+# pytest cache
+.pytest_cache/
+
+# C extension cache
+*.so
