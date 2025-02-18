@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from collections import deque
 import time
 
-PORT = 'COM7' 
+PORT = 'COM9' 
 BAUD_RATE = 115200
 
 ser = serial.Serial(PORT, BAUD_RATE)
@@ -17,7 +17,7 @@ plt.ion()
 fig, ax = plt.subplots()
 line_roll, = ax.plot([], [], label="Roll (°)", color="r")
 line_pitch, = ax.plot([], [], label="Pitch (°)", color="g")
-# line_yaw, = ax.plot([], [], label="Yaw (°)", color="b")
+line_yaw, = ax.plot([], [], label="Yaw (°)", color="b")
 
 ax.set_xlim(0, buffer_size)
 ax.set_ylim(-180, 180)  
