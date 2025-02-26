@@ -6,6 +6,7 @@
 #include <math.h>
 #include <TinyGPSPlus.h>
 #include <SoftwareSerial.h>
+#include "driver/uart.h"
 
 using namespace Eigen;
 
@@ -18,19 +19,18 @@ Adafruit_LSM6DSOX lsm6ds;
 Adafruit_LIS3MDL lis3mdl;
 
 // GPS
-static const int RXPIN = 44, TXPin = 3;
-static const uint32_t GPSBAUD = 9600;
+static const int RXPIN = 44, TXPIN = 43;
+static const uint32_t GPS_BAUD = 9600;
 
-TinyGpsPlus gps;
-SoftwareSerial ss(RXPIN, TXPIN) //rx, tx
-
-
-
+TinyGPSPlus gps;
+HardwareSerial gpsSerial(2); //rx, tx
 
 
 // Function prototypes
 void setupIMU();
 void setupMagnetometer();
+void setupGPS();
+
 void getIMUData();
 void getMagnetometerData();
 
@@ -47,26 +47,26 @@ void setup() {
     Serial.println("Eigen is working!");
     Serial.println("Initializing Sensors...");
 
-    // Setup sensors
+    Setup sensors
     setupIMU();
     setupMagnetometer();
-    setupGPS();
+    // setupGPS();
+
+    serial.println("done magnetoemter");
 
 
-//     GPS_Serial.begin(GPS_BAUD, 1, 2);
-//     GPS.begin(GPS_BAUD);
-//     GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
-//     GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
-//     Serial.println("GPS Initialized...");
 }
 
 void loop() {
-  unsigned long current_time = millis();
-  float dt = (current_time - prev_time) / 1000.0; // Convert to seconds
-  prev_time = current_time;
+  while (gpsSerial.available()){
+    Serial.write(gpsSerial.read());
+  }
+  // unsigned long current_time = millis();
+  // float dt = (current_time - prev_time) / 1000.0; // Convert to seconds
+  // prev_time = current_time;
 
-  getGPSData
-  delay(10);
+  // getGPSData();
+  // delay(10);
 
 }
 
@@ -75,23 +75,28 @@ void loop() {
 /* ============================ */
 
 void setupGPS() {
-  ss.begin(GPS_BAUD);
+    Serial.println("Reading GPS data...");
 
-  Serial.println(F("SatelliteTracker.ino"));
-  Serial.println(F("Monitoring satellite location and signal strength using TinyGPSCustom"));
-  Serial.print(F("Testing TinyGPSPlus library v. ")); Serial.println(TinyGPSPlus::libraryVersion());
-  Serial.println(F("by Mikal Hart"));
-  Serial.println();
+    gpsSerial.begin(9600, SERIAL_8N1, RX_PIN, TX_PIN);
+    uart_set_pin(UART_NUM_2, TX_PIN, RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 }
 
 void getGPSData() {
-  if (ss.available() > 0){
-    gps.encode(ss.read())
-  }
-  if (gps.location.isUpdated()){
-    Serial.print("Lat="); Serial.print(gps.location.lat(), 6);
-    Serial.print("LNG="); Serial.print(gps.location.lng(), 6);
-  }
+    while (gpsSerial.available()) {
+        char c = gpsSerial.read();
+        gps.encode(c);
+    }
+
+    Serial.print("Fix Status: ");
+    Serial.println(gps.satellites.value() > 0 ? "FIXED ✅" : "NO FIX ❌");
+
+    Serial.print("Latitude: "); Serial.println(gps.location.lat(), 6);
+    Serial.print("Longitude: "); Serial.println(gps.location.lng(), 6);
+    Serial.print("Satellites: "); Serial.println(gps.satellites.value());
+    Serial.print("Speed (km/h): "); Serial.println(gps.speed.kmph());
+    Serial.println("----------------------");
+
+    delay(1000);
 }
 
 
@@ -121,7 +126,7 @@ void setupMagnetometer() {
     lis3mdl.configInterrupt(false, false, true, true, false, true);
 }
 
-void getIMUData() {
+void getIMUData(float dt) {
   sensors_event_t accel, gyro, temp;
   lsm6ds.getEvent(&accel, &gyro, &temp);
 
