@@ -33,6 +33,7 @@ try:
         ser.reset_input_buffer() 
         line = ser.readline().decode().strip()  
 
+
         if line:
             try:
                 values = list(map(float, line.split(',')))

@@ -1,0 +1,43 @@
+#include <SPI.h>
+#include <LoRa.h>
+
+#define SS 5      // Chip Select (CS) - GPIO5 (D2)
+#define RST 6     // Reset - GPIO6 (D3)
+#define DIO0 7    // Interrupt (IRQ) - GPIO7 (D4)
+
+// Correct SPI Pins for ESP32-S3 Nano
+#define SCK 48    // SPI Clock (D13)
+#define MISO 47   // SPI MISO (D12)
+#define MOSI 38   // SPI MOSI (D11)
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial);
+
+  Serial.println("LoRa Transmitter");
+
+  // Correct SPI initialization
+  SPI.begin(SCK, MISO, MOSI, SS);
+
+  // Set LoRa module control pins
+  LoRa.setPins(SS, RST, DIO0);
+
+  // Initialize LoRa module
+  if (!LoRa.begin(433E6)) {  // Set frequency to 433 MHz
+    Serial.println("Starting LoRa failed! Check wiring.");
+    while (1);
+  }
+
+  Serial.println("LoRa Initialized!");
+}
+
+void loop() {
+  Serial.println("Sending packet...");
+
+  LoRa.beginPacket();
+  LoRa.print("Hello from ESP32-S3!");
+  LoRa.endPacket();
+
+  Serial.println("Packet Sent!");
+  delay(2000);  // Send a message every 2 seconds
+}
