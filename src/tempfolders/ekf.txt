@@ -1,0 +1,462 @@
+#include <HardwareSerial.h>
+#include <Adafruit_LSM6DSOX.h>
+#include <Adafruit_GPS.h>
+#include <Adafruit_LIS3MDL.h>
+#include <ArduinoEigenDense.h>
+#include <math.h>
+#include <TinyGPSPlus.h>
+#include <SoftwareSerial.h>
+#include "driver/uart.h"
+ 
+using namespace Eigen;
+ 
+// IMU (Accelerometer & Gyro)
+Adafruit_LSM6DSOX lsm6ds;
+// Magnetometer
+Adafruit_LIS3MDL lis3mdl;
+ 
+// GPS
+static const int RXPIN = 44, TXPIN = 43;
+static const uint32_t GPS_BAUD = 9600;
+TinyGPSPlus gps;
+HardwareSerial gpsSerial(2);
+ 
+// Function prototypes
+void setupIMU();
+void setupMagnetometer();
+void setupGPS();
+void getIMUData();
+void getMagnetometerData();
+ 
+// Time synchronization
+unsigned long prev_time = 0;
+const double dt = 0.01;
+const double g = 9.81;
+const double magDecRad = -2.7 * M_PI / 180;
+ 
+// Low-pass filter measurements
+double p = 0.0, q = 0.0, r = 0.0;
+double ax = 0.0, ay = 0.0, az = 0.0;
+double mx = 0.0, my = 0.0, mz = 0.0;
+ 
+// EKF variables (10 states)
+Eigen::VectorXd x = Eigen::VectorXd::Zero(10);
+MatrixXd Q = MatrixXd::Zero(10, 10);
+MatrixXd P = MatrixXd::Zero(10, 10);
+MatrixXd R = MatrixXd::Zero(6, 6);
+MatrixXd C = MatrixXd::Zero(6, 10);
+MatrixXd A = MatrixXd::Zero(10, 10);
+Matrix<double, 10, 6> K = Matrix<double, 10, 6>::Zero();
+
+double q0;
+double q1;
+double q2;
+double q3;
+ 
+// Process noise
+const double nProcAtt = 0.00005;
+const double nProcBias = 0.000001;
+ 
+// Measurement noise
+const double nMeasAcc = 0.05;
+const double nMeasMag = 0.02;
+ 
+// Low-pass filter coefficients
+const double GyroCoef = 0.7;
+const double AccCoef = 0.9;
+const double MagCoef = 0.4;
+const double VaCoef = 0.7;
+double smag, cmag;
+double Va = 0.0;
+ 
+// Function prototypes
+Eigen::Matrix<double, 6, 10> computeJacobianC(double g, double Va, double smag, double cmag, double q0, double q1, double q2, double q3);
+void updateAMatrix(double p, double q, double r, double bp, double bq, double br, double q0, double q1, double q2, double q3);
+Eigen::Vector3d computeAccEstimate(double g, double Va, double p, double q, double r, double bp, double bq, double br, double q0, double q1, double q2, double q3);
+Eigen::Vector3d computeMagUnitEstimate(double magDecRad, double q0, double q1, double q2, double q3);
+Eigen::Matrix<double, 10, 10> computeJacobian(double p, double q, double r, double bp, double bq, double br, double q0, double q1, double q2, double q3);
+ 
+void setup() {
+    Serial.begin(115200);
+    while (!Serial) delay(10);
+ 
+    Serial.println("Eigen is working!");
+    Serial.println("Initializing Sensors...");
+ 
+    setupIMU();
+    setupMagnetometer();
+ 
+    Serial.println("Sensors initialized!");
+ 
+    x(0) = 1; // Identity quaternion
+ 
+    // Initialize process noise covariance
+    for (int i = 0; i < 4; i++) Q(i, i) = nProcAtt * nProcAtt;
+    for (int i = 4; i < 10; i++) Q(i, i) = nProcBias * nProcBias;
+ 
+    // Initialize measurement covariance
+    for (int i = 0; i < 3; i++) R(i, i) = nMeasAcc * nMeasAcc;
+    for (int i = 3; i < 6; i++) R(i, i) = nMeasMag * nMeasMag;
+}
+ 
+void loop() {
+    unsigned long current_time = millis();
+    prev_time = current_time;
+ 
+    sensors_event_t accel, gyro, mag, temp;
+    lsm6ds.getEvent(&accel, &gyro, &temp);
+    lis3mdl.getEvent(&mag);
+ 
+    // Raw IMU readings
+    ax = accel.acceleration.x;
+    ay = accel.acceleration.y;
+    az = accel.acceleration.z;
+    double gx = gyro.gyro.x;
+    double gy = gyro.gyro.y;
+    double gz = gyro.gyro.z;
+    mx = mag.magnetic.x;
+    my = mag.magnetic.y;
+    mz = mag.magnetic.z;
+ 
+    // Low-pass filtering
+    p = GyroCoef * p + (1 - GyroCoef) * gx;
+    q = GyroCoef * q + (1 - GyroCoef) * gy;
+    r = GyroCoef * r + (1 - GyroCoef) * gz;
+    ax = AccCoef * ax + (1 - AccCoef) * ax;
+    ay = AccCoef * ay + (1 - AccCoef) * ay;
+    az = AccCoef * az + (1 - AccCoef) * az;
+    mx = MagCoef * mx + (1 - MagCoef) * mx;
+    my = MagCoef * my + (1 - MagCoef) * my;
+    mz = MagCoef * mz + (1 - MagCoef) * mz;
+ 
+    // Gyro bias correction
+    double p_corr = p - x(4), q_corr = q - x(5), r_corr = r - x(6);
+ 
+    // Accelerometer bias correction
+    double ax_corr = ax - x(7);
+    double ay_corr = ay - x(8);
+    double az_corr = az - x(9);
+ 
+    // Compute A matrix
+    A = computeJacobian(p, q, r, x(4), x(5), x(6), x(0), x(1), x(2), x(3));
+    P = P + dt * (A * P + P * A.transpose() + Q);
+ 
+    // Compute magnetometer field unit vector
+    smag = sin(magDecRad);
+    cmag = cos(magDecRad);
+    Vector3d magUnitEstimate = computeMagUnitEstimate(magDecRad, x(0), x(1), x(2), x(3));
+ 
+    // Compute accelerometer estimate
+    Vector3d accEstimate = computeAccEstimate(g, Va, p, q, r, x(4), x(5), x(6), x(0), x(1), x(2), x(3));
+    VectorXd z(6);
+    z.head<3>() = accEstimate;
+    z.tail<3>() = magUnitEstimate;
+
+    // Compute measurement Jacobian
+    C = computeJacobianC(g, Va, smag, cmag, x(0), x(1), x(2), x(3));
+    K = P * C.transpose() * (C * P * C.transpose() + R).inverse();
+    P = (MatrixXd::Identity(10, 10) - K * C) * P;
+
+    x += K * (VectorXd(6) << ax, ay, az, mx, my, mz).finished() - z;
+ 
+    q0 = x(0);
+    q1 = x(1);
+    q2 = x(2);
+    q3 = x(3);
+    
+    double roll_deg = atan2(2 * (q0 * q1 + q2 * q3), q0 * q0 + q3 * q3 - q1 * q1 - q2 * q2) * 180 / M_PI;
+    double pitch_deg = asin(2 * (q0 * q2 - q1 * q3)) * 180 / M_PI;
+    double yaw_deg = atan2(2 * (q0 * q3 + q1 * q2), q0 * q0 + q1 * q1 - q2 * q2 - q3 * q3) * 180 / M_PI;
+    
+    Serial.print(roll_deg);
+    Serial.print(",");
+    Serial.print(pitch_deg);
+    Serial.print(",");
+    Serial.print(yaw_deg);
+
+    delay(10);
+}
+
+
+
+
+/* MATHS FUNCTION ======================= 
+*/
+
+void updateAMatrix(double p, double q, double r, double bp, double bq, double br, double q0, double q1, double q2, double q3) {
+
+    // Reset A to zero before updating
+
+    A.setZero();
+ 
+    // Quaternion derivative terms (from q-dot equation)
+
+    A(0, 1) = -0.5 * (p - bp);
+
+    A(0, 2) = -0.5 * (q - bq);
+
+    A(0, 3) = -0.5 * (r - br);
+
+    A(0, 4) = 0.5 * q1;
+
+    A(0, 5) = 0.5 * q2;
+
+    A(0, 6) = 0.5 * q3;
+ 
+    A(1, 0) = 0.5 * (p - bp);
+
+    A(1, 2) = 0.5 * (r - br);
+
+    A(1, 3) = -0.5 * (q - bq);
+
+    A(1, 4) = -0.5 * q0;
+
+    A(1, 5) = 0.5 * q3;
+
+    A(1, 6) = -0.5 * q2;
+ 
+    A(2, 0) = 0.5 * (q - bq);
+
+    A(2, 1) = -0.5 * (r - br);
+
+    A(2, 3) = 0.5 * (p - bp);
+
+    A(2, 4) = -0.5 * q3;
+
+    A(2, 5) = -0.5 * q0;
+
+    A(2, 6) = 0.5 * q1;
+ 
+    A(3, 0) = 0.5 * (r - br);
+
+    A(3, 1) = 0.5 * (q - bq);
+
+    A(3, 2) = -0.5 * (p - bp);
+
+    A(3, 4) = 0.5 * q2;
+
+    A(3, 5) = -0.5 * q1;
+
+    A(3, 6) = -0.5 * q0;
+ 
+    // Bias states do not change (constant over time)
+
+    A(7, 7) = 1;  // ba_x
+
+    A(8, 8) = 1;  // ba_y
+
+    A(9, 9) = 1;  // ba_z
+
+}
+
+ 
+
+
+// Function to compute Jacobian matrix C(x, u)
+Eigen::Matrix<double, 6, 10> computeJacobianC(double g, double Va, double smag, double cmag, double q0, double q1, double q2, double q3) {
+    // Initialize C as a 6x7 zero matrix
+    Eigen::Matrix<double, 6, 10> C = Eigen::Matrix<double, 6, 10>::Zero();
+    C.setZero();
+    // Fill the first 3 rows (accelerometer Jacobian)
+    C(0, 0) =  2.0 * g * q2;
+    C(0, 1) = -2.0 * g * q3;
+    C(0, 2) =  2.0 * g * q0;
+    C(0, 3) = -2.0 * g * q1;
+ 
+    C(1, 0) = -2.0 * g * q1;
+    C(1, 1) = -2.0 * g * q0;
+    C(1, 2) = -2.0 * g * q3;
+    C(1, 3) = -2.0 * g * q2;
+    C(1, 6) = -Va;
+ 
+    C(2, 1) =  4.0 * g * q1;
+    C(2, 2) =  4.0 * g * q2;
+    C(2, 5) =  Va;
+ 
+    // Fill the last 3 rows (magnetometer Jacobian)
+    C(3, 0) =  2.0 * q3 * smag;
+    C(3, 1) =  2.0 * q2 * smag;
+    C(3, 2) =  2.0 * q1 * smag - 4.0 * q2 * cmag;
+    C(3, 3) =  2.0 * q0 * smag - 4.0 * q3 * cmag;
+ 
+    C(4, 0) = -2.0 * q3 * cmag;
+    C(4, 1) =  2.0 * q2 * cmag - 4.0 * q1 * smag;
+    C(4, 2) =  2.0 * q1 * cmag;
+    C(4, 3) = -2.0 * q0 * cmag - 4.0 * q3 * smag;
+ 
+    C(5, 0) =  2.0 * q2 * cmag - 2.0 * q1 * smag;
+    C(5, 1) =  2.0 * q3 * cmag - 2.0 * q0 * smag;
+    C(5, 2) =  2.0 * q0 * cmag + 2.0 * q3 * smag;
+    C(5, 3) =  2.0 * q1 * cmag + 2.0 * q2 * smag;
+    
+    C(0, 7) = -1.0;
+    C(1, 8) = -1.0;
+    C(2, 9) = -1.0;
+    return C;
+}
+
+// Function to compute accelerometer estimate
+Eigen::Vector3d computeAccEstimate(double g, double Va, double p, double q, double r, double bp, double bq, double br, double q0, double q1, double q2, double q3) {
+    Eigen::Vector3d accEstimate;
+    accEstimate(0) = -2.0 * g * (q1 * q3 - q2 * q0);
+    accEstimate(1) = Va * (r - br) - 2.0 * g * (q2 * q3 + q1 * q0);
+    accEstimate(2) = -Va * (q - bq) - g * (1 - 2.0 * (q1 * q1 + q2 * q2));
+ 
+    return accEstimate;
+}
+
+Eigen::Vector3d computeMagUnitEstimate(double magDecRad, double q0, double q1, double q2, double q3) {
+    // Compute sine and cosine of magnetic declination
+
+ 
+    // Compute the estimated magnetometer unit vector in the body frame
+    Eigen::Vector3d magUnitEstimate;
+    magUnitEstimate(0) = smag * (2 * q0 * q3 + 2 * q1 * q2) - cmag * (2 * q2 * q2 + 2 * q3 * q3 - 1);
+    magUnitEstimate(1) = -cmag * (2 * q0 * q3 - 2 * q1 * q2) - smag * (2 * q1 * q1 + 2 * q3 * q3 - 1);
+    magUnitEstimate(2) = cmag * (2 * q0 * q2 + 2 * q1 * q3) - smag * (2 * q0 * q1 - 2 * q2 * q3);
+ 
+    return magUnitEstimate;
+}
+
+
+Eigen::Matrix<double, 10, 10> computeJacobian(double p, double q, double r, double bp, double bq, double br, double q0, double q1, double q2, double q3)
+{
+    Eigen::Matrix<double, 10, 10> A = Eigen::Matrix<double, 10, 10>::Zero();
+    A.setZero();
+    // Quaternion derivatives (top-left block: 4x4)
+    A(0, 1) = -0.5 * (p - bp);
+    A(0, 2) = -0.5 * (q - bq);
+    A(0, 3) = -0.5 * (r - br);
+    A(0, 4) =  0.5 * q1;
+    A(0, 5) =  0.5 * q2;
+    A(0, 6) =  0.5 * q3;
+ 
+    A(1, 0) =  0.5 * (p - bp);
+    A(1, 2) =  0.5 * (r - br);
+    A(1, 3) = -0.5 * (q - bq);
+    A(1, 4) = -0.5 * q0;
+    A(1, 5) =  0.5 * q3;
+    A(1, 6) = -0.5 * q2;
+ 
+    A(2, 0) =  0.5 * (q - bq);
+    A(2, 1) = -0.5 * (r - br);
+    A(2, 3) =  0.5 * (p - bp);
+    A(2, 4) = -0.5 * q3;
+    A(2, 5) = -0.5 * q0;
+    A(2, 6) =  0.5 * q1;
+ 
+    A(3, 0) =  0.5 * (r - br);
+    A(3, 1) =  0.5 * (q - bq);
+    A(3, 2) = -0.5 * (p - bp);
+    A(3, 4) =  0.5 * q2;
+    A(3, 5) = -0.5 * q1;
+    A(3, 6) = -0.5 * q0;
+ 
+    // Gyroscope bias terms (gyro biases only affect themselves, no derivatives)
+    A(4, 4) = 0.0;
+    A(5, 5) = 0.0;
+    A(6, 6) = 0.0;
+ 
+    // Accelerometer bias terms (static terms)
+    A(7, 7) = 0.0;  // ba_x
+    A(8, 8) = 0.0;  // ba_y
+    A(9, 9) = 0.0;  // ba_z
+}
+
+
+/* ============================ */
+/*        SENSOR FUNCTIONS      */
+/* ============================ */
+
+void setupGPS() {
+    Serial.println("Reading GPS data...");
+
+    gpsSerial.begin(9600, SERIAL_8N1, RXPIN, TXPIN);
+    uart_set_pin(UART_NUM_2, TXPIN, RXPIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+}
+
+void getGPSData() {
+    while (gpsSerial.available()) {
+        char c = gpsSerial.read();
+        gps.encode(c);
+    }
+
+    Serial.print("Fix Status: ");
+    Serial.println(gps.satellites.value() > 0 ? "FIXED ✅" : "NO FIX ❌");
+
+    Serial.print("Latitude: "); Serial.println(gps.location.lat(), 6);
+    Serial.print("Longitude: "); Serial.println(gps.location.lng(), 6);
+    Serial.print("Satellites: "); Serial.println(gps.satellites.value());
+    Serial.print("Speed (km/h): "); Serial.println(gps.speed.kmph());
+    Serial.println("----------------------");
+
+    delay(1000);
+}
+
+
+// Setup function for IMU (Accelerometer & Gyroscope)
+void setupIMU() {
+    if (!lsm6ds.begin_I2C()) {
+        Serial.println("Failed to find LSM6DS IMU!");
+        while (1) delay(10);
+    }
+    Serial.println("LSM6DS IMU Found!");
+}
+
+// Setup function for Magnetometer
+void setupMagnetometer() {
+    if (!lis3mdl.begin_I2C()) {
+        Serial.println("Failed to find LIS3MDL Magnetometer!");
+        while (1) delay(10);
+    }
+
+    Serial.println("LIS3MDL Magnetometer Found!");
+    
+    lis3mdl.setDataRate(LIS3MDL_DATARATE_155_HZ);
+    lis3mdl.setRange(LIS3MDL_RANGE_4_GAUSS);
+    lis3mdl.setPerformanceMode(LIS3MDL_MEDIUMMODE);
+    lis3mdl.setOperationMode(LIS3MDL_CONTINUOUSMODE);
+    lis3mdl.setIntThreshold(500);
+    lis3mdl.configInterrupt(false, false, true, true, false, true);
+}
+
+// void getIMUData(double dt) {
+//   sensors_event_t accel, gyro, temp;
+//   lsm6ds.getEvent(&accel, &gyro, &temp);
+
+//   sensors_event_t mag;
+//   lis3mdl.getEvent(&mag);
+
+//   double ax = accel.acceleration.x;
+//   double ay = accel.acceleration.y;
+//   double az = accel.acceleration.z;
+
+//   double gx = gyro.gyro.x * (180.0 / M_PI);
+//   double gy = gyro.gyro.y * (180.0 / M_PI);
+//   double gz = gyro.gyro.z * (180.0 / M_PI);
+
+//   double roll_acc = atan2(ay, az) * (180.0 / M_PI);
+//   double pitch_acc = atan2(-ax, sqrt(ay * ay + az * az)) * (180.0 / M_PI);
+
+//   double roll = alpha * (roll + gx * dt) + (1 - alpha) * roll_acc;
+//   double pitch = alpha * (pitch + gy * dt) + (1 - alpha) * pitch_acc;
+
+//   Serial.print(roll);
+//   Serial.print(",");
+//   Serial.print(pitch);
+
+//   // Serial.print(",");
+//   // Serial.print(yaw);
+//   Serial.println();
+// }
+
+// Function to get Magnetometer Data
+void getMagnetometerData() {
+    sensors_event_t mag;
+    lis3mdl.getEvent(&mag);
+
+    Serial.print("Mag X: "); Serial.print(mag.magnetic.x, 4);
+    Serial.print(" Y: "); Serial.print(mag.magnetic.y, 4);
+    Serial.print(" Z: "); Serial.println(mag.magnetic.z, 4);
+}
+
